@@ -1,0 +1,52 @@
+#include <linux/sched.h>
+
+BEGIN
+{
+        printf("Tracing the task broken by the softirq... Hit Ctrl-C to end.\n");
+}
+
+tracepoint:sched:sched_switch
+/(@qtime[args->next_pid] == 0) && (args->next_pid==$1)/
+{
+        @qtime[args->next_pid] = nsecs;
+}
+
+tracepoint:irq:softirq_entry
+/@qtime[tid] && (tid==$1)/
+{
+        @softstart_vec[tid] = nsecs;
+}
+
+tracepoint:irq:softirq_exit
+/@softstart_vec[tid] && (tid==$1)/
+{
+        $delta = nsecs - @softstart_vec[tid];
+	if (args->vec == 3) {
+        	@sum_vec[3, tid] = @sum_vec[args->vec, tid] + $delta;
+	}
+	@sum[tid]=@sum[tid] + $delta;
+        delete(@softstart_vec[tid]);
+}
+
+tracepoint:sched:sched_switch
+/@qtime[args->prev_pid] && (args->prev_pid==$1)/
+{
+        if (@sum[args->prev_pid] > $2) {
+                printf("[%-2d] %-8s: %6lld broken by sirq %5lld us sirq[3]:%5lld us in ", cpu, args->prev_comm, args->prev_pid, @sum[args->prev_pid] / 1000, @sum_vec[3, args->prev_pid]/1000);
+                time("%H:%M:%S\n");
+	}
+        
+	delete(@qtime[args->prev_pid]);
+	delete(@sum[args->prev_pid]);
+	delete(@sum_vec[1, args->prev_pid]);
+	delete(@sum_vec[3, args->prev_pid]);
+	delete(@sum_vec[7, args->prev_pid]);
+}
+
+END
+{
+        clear(@qtime);
+	clear(@sum);
+        clear(@softstart_vec);
+	clear(@sum_vec);
+}

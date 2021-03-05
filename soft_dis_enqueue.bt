@@ -1,0 +1,90 @@
+#include <linux/sched.h>
+
+BEGIN
+{
+        printf("Tracing the task enqueue brk by softirq... Hit Ctrl-C to end.\n");
+}
+
+tracepoint:sched:sched_wakeup,
+tracepoint:sched:sched_wakeup_new
+/(args->pid==$1) && (@qtime[$1, args->target_cpu] == 0)/
+{
+	//用来记录唤醒前的时间，唤醒时，即开始入队，调度延迟开始计算
+        @qtime[$1, args->target_cpu] = nsecs;
+	//用来记录被唤醒到什么cpu上
+	@wake_cpu = args->target_cpu;
+}
+
+tracepoint:sched:sched_migrate_task
+/@qtime[args->pid, args->orig_cpu] && args->pid == $1/
+{
+	//如果有发生migrate，需要重新指定wake cpu
+	@wake_cpu = args->dest_cpu;
+	//qtime的map变量由于cpu的变动此时需要重新赋值，开始追踪在新的cpu上的软中断干扰
+	@qtime[$1, args->dest_cpu] = @qtime[$1, args->orig_cpu];
+	//删除之前的map变量
+	delete(@qtime[$1, args->orig_cpu]);
+}
+
+tracepoint:irq:softirq_entry
+//如果当前cpu和wakecpu一样，说明被跟踪的线程此时就在该cpu上，需要开始计时被软中断干扰的时间
+/cpu == @wake_cpu && @qtime[$1, cpu]/
+{
+        @softstart_vec[$1, cpu] = nsecs;
+}
+
+tracepoint:irq:softirq_exit
+//这里一定要注意@softstart_vec[$1, cpu]非0的判断，引入有可能被跟踪的线程在入队的时候此时已经跳过softirq_entry
+/cpu == @wake_cpu && @qtime[$1, cpu] && @softstart_vec[$1, cpu]/
+{
+        $delta = nsecs - @softstart_vec[$1,cpu];
+	//这里用来记录每种软中断对跟踪线程的影响
+	@sum_vec[args->vec, $1] = @sum_vec[args->vec, $1] + $delta;
+	//这里用来记录总的软中断的影响
+	@sum[$1]=@sum[$1] + $delta;
+        delete(@softstart_vec[$1,cpu]);
+}
+
+tracepoint:sched:sched_switch
+/@qtime[$1,@wake_cpu] && (args->next_pid==$1)/
+{
+	//如果此次软中断的干扰时间大于设定的阈值，进行详细信息的打印
+        if (@sum[$1] > $2) {
+		//这里会打印干扰的总时间，以及细分每种软中断的干扰时间
+                printf("[%-2d] %-8s: %6lld enqueue broken by softirq %5lld us ",
+			cpu, args->next_comm, args->next_pid, @sum[args->next_pid] / 1000);
+		printf("sirq_vev:%5lld %5lld %5lld %5lld %5lld %5lld ", 
+			@sum_vec[0, args->next_pid]/1000, @sum_vec[1, args->next_pid]/1000, @sum_vec[2, args->next_pid]/1000,
+			@sum_vec[3, args->next_pid]/1000, @sum_vec[4, args->next_pid]/1000, @sum_vec[5, args->next_pid]/1000);
+		printf("%5lld %5lld %5lld %5lld us in ", 
+			@sum_vec[6, args->next_pid]/1000, @sum_vec[7, args->next_pid]/1000, @sum_vec[8, args->next_pid]/1000,
+			@sum_vec[9, args->next_pid]/1000);
+                time("%H:%M:%S\n");
+	}
+	
+	//这个内核版本的while循环有问题
+	delete(@sum_vec[0, args->next_pid]);
+	delete(@sum_vec[1, args->next_pid]);
+	delete(@sum_vec[2, args->next_pid]);
+	delete(@sum_vec[3, args->next_pid]);
+	delete(@sum_vec[4, args->next_pid]);
+	delete(@sum_vec[5, args->next_pid]);
+	delete(@sum_vec[6, args->next_pid]);
+	delete(@sum_vec[7, args->next_pid]);
+	delete(@sum_vec[8, args->next_pid]);
+	delete(@sum_vec[9, args->next_pid]);
+
+	//由于delet以后wakecpu的默认值为0，可能和cpu0混淆，这里设定一个特定的值	
+	@wake_cpu=10086;
+	delete(@qtime[$1, @wake_cpu]);
+	delete(@sum[$1]);
+}
+
+END
+{
+        clear(@qtime);
+	clear(@sum);
+        clear(@softstart_vec);
+	clear(@sum_vec);
+	clear(@wake_cpu);
+}

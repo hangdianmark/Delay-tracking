@@ -1,0 +1,43 @@
+#include <linux/sched.h>
+
+BEGIN
+{
+	printf("Tracing task block time... Hit Ctrl-C to end.\n");
+}
+
+tracepoint:sched:sched_switch
+/args->prev_pid==$1/
+{
+	if (args->prev_state == 2) {
+		@start[args->prev_pid] = nsecs;
+		@wakee[args->prev_pid] = kstack();
+	}
+}
+
+tracepoint:sched:sched_stat_blocked
+/args->pid==$1/
+{
+	if (@start[args->pid] != 0) {
+		@blocktime = hist(args->delay/1000);
+
+		if (args->delay > $2) {
+			printf("pid:%-8lld comm:%-12s block time: %10lld us in ", args->pid, args->comm, args->delay/1000);
+			time("%H:%M:%S\n\n");
+			
+			printf("wakee %s:%d stack:", args->comm, args->pid);
+			printf("%s \n", @wakee[args->pid]);
+			printf("waker %s:%d stack:", comm, tid);
+			printf("%s \n", kstack());
+			printf("---------------------------------------------------------\n\n");
+		}
+
+		delete(@start[args->pid]);
+		delete(@wakee[args->pid])
+	}
+}
+
+END
+{
+	clear(@start);
+	clear(@wakee);
+}
